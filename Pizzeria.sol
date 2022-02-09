@@ -10,11 +10,11 @@ import "./Upgrade.sol";
 import "./Pizza.sol";
 import "./PizzeriaProgression.sol";
 
-contract Pizzeria is PizzeriaProgression, Ownable, ReentrancyGuard {
+contract Pizzeria is PizzeriaProgression, ReentrancyGuard {
     using SafeMath for uint256;
 
     // Constants
-    uint256 public constant YIELD_PPS = 16666666666666667; // pizza baked per second per unit of yield
+    uint256 public constant YIELD_PPS = 16666666666666667; // pizza cooked per second per unit of yield
     uint256 public constant CLAIM_PIZZA_CONTRIBUTION_PERCENTAGE = 10;
     uint256 public constant CLAIM_PIZZA_BURN_PERCENTAGE = 10;
     uint256 public constant MAX_FATIGUE = 100000000000000;
@@ -33,17 +33,17 @@ contract Pizzeria is PizzeriaProgression, Ownable, ReentrancyGuard {
     struct StakedChefInfo {
         uint256 chefId;
         uint256 upgradeId;
+        uint256 chefPPM;
+        uint256 upgradePPM;
         uint256 pizza;
         uint256 fatigue;
         uint256 timeUntilFatigued;
     }
 
     mapping(uint256 => StakedChef) public stakedChefs; // tokenId => StakedChef
-    mapping(address => mapping(uint256 => uint256)) private ownedChefStakes; // (address, index) => stake
+    mapping(address => mapping(uint256 => uint256)) private ownedChefStakes; // (address, index) => tokenid
     mapping(uint256 => uint256) private ownedChefStakesIndex; // tokenId => index in its owner's stake list
     mapping(address => uint256) public ownedChefStakesBalance; // address => stake count
-
-    mapping(uint256 => uint256) public ownedUpgradeByChef; // chef tokenId => upgrade tokenId
 
     mapping(address => uint256) public fatiguePerMinute; // address => fatigue per minute in the pizzeria
     mapping(uint256 => uint256) private chefFatigue; // tokenId => fatigue
@@ -52,6 +52,16 @@ contract Pizzeria is PizzeriaProgression, Ownable, ReentrancyGuard {
     mapping(address => uint256[2]) private numberOfChefs; // address => [number of regular chefs, number of master chefs]
     mapping(address => uint256) private totalPPM; // address => total PPM
 
+    struct StakedUpgrade {
+        address owner;
+        uint256 tokenId;
+        bool staked;
+    }
+
+    mapping(uint256 => StakedUpgrade) public stakedUpgrades; // tokenId => StakedUpgrade
+    mapping(address => mapping(uint256 => uint256)) private ownedUpgradeStakes; // (address, index) => tokenid
+    mapping(uint256 => uint256) private ownedUpgradeStakesIndex; // tokenId => index in its owner's stake list
+    mapping(address => uint256) public ownedUpgradeStakesBalance; // address => stake count
 
     // Fatigue cooldowns
 
@@ -88,12 +98,13 @@ contract Pizzeria is PizzeriaProgression, Ownable, ReentrancyGuard {
 
     // Views
 
-    function _getUpgradeStakedForChef(uint256 _chefId) internal view returns (uint256) {
-        return ownedUpgradeByChef[_chefId];
+    function _getUpgradeStakedForChef(address _owner, uint256 _chefId) internal view returns (uint256) {
+        uint256 index = ownedChefStakesIndex[_chefId];
+        return ownedUpgradeStakes[_owner][index];
     }
 
-    function _getFatiguePerMinuteWithModifier(address _owner) internal view returns (uint256) {
-        uint256 fatigueSkillModifier = _getFatigueSkillModifier(_owner);
+    function getFatiguePerMinuteWithModifier(address _owner) public view returns (uint256) {
+        uint256 fatigueSkillModifier = getFatigueSkillModifier(_owner);
         return fatiguePerMinute[_owner].mul(fatigueSkillModifier).div(100);
     }
 
@@ -111,7 +122,7 @@ contract Pizzeria is PizzeriaProgression, Ownable, ReentrancyGuard {
             require(stakedChef.owner == _msgSender(), "You don't own this token");
         }
 
-        uint256 fatigue = (block.timestamp - stakedChef.startTimestamp) * _getFatiguePerMinuteWithModifier(stakedChef.owner);
+        uint256 fatigue = (block.timestamp - stakedChef.startTimestamp) * getFatiguePerMinuteWithModifier(stakedChef.owner) / 60;
         fatigue += chefFatigue[_tokenId];
         if (fatigue > MAX_FATIGUE) {
             fatigue = MAX_FATIGUE;
@@ -122,38 +133,42 @@ contract Pizzeria is PizzeriaProgression, Ownable, ReentrancyGuard {
     /**
      * Returns the timestamp of when the chef will be fatigued
      */
+    function timeUntilFatiguedCalculation(uint256 _startTime, uint256 _fatigue, uint256 _fatiguePerMinute) public pure returns (uint256) {
+        return _startTime + 60 * ( MAX_FATIGUE - _fatigue ) / _fatiguePerMinute;
+    }
+
     function getTimeUntilFatigued(uint256 _tokenId, bool checkOwnership) public view returns (uint256) {
         StakedChef memory stakedChef = stakedChefs[_tokenId];
         require(stakedChef.staked, "This token isn't staked");
         if (checkOwnership) {
             require(stakedChef.owner == _msgSender(), "You don't own this token");
         }
-
-        return stakedChef.startTimestamp + 60 * ( MAX_FATIGUE - chefFatigue[_tokenId] ) / _getFatiguePerMinuteWithModifier(stakedChef.owner); 
+        return timeUntilFatiguedCalculation(stakedChef.startTimestamp, chefFatigue[_tokenId], getFatiguePerMinuteWithModifier(stakedChef.owner));
     }
 
     /**
      * Returns the timestamp of when the chef will be fully rested
      */
-    function _getRestingTime(uint256 _tokenId, bool checkOwnership) public view returns (uint256) {
+     function restingTimeCalculation(uint256 _chefType, uint256 _masterChefType, uint256 _fatigue) public pure returns (uint256) {
+        uint256 maxTime = 43200; //12*60*60
+        if( _chefType == _masterChefType){
+            maxTime = maxTime / 2; // master chefs rest half of the time of regular chefs
+        }
+
+        if(_fatigue > MAX_FATIGUE / 2){
+            return maxTime * _fatigue / MAX_FATIGUE;
+        }
+
+        return maxTime / 2; // minimum rest time is half of the maximum time
+    }
+    function getRestingTime(uint256 _tokenId, bool checkOwnership) public view returns (uint256) {
         StakedChef memory stakedChef = stakedChefs[_tokenId];
         require(stakedChef.staked, "This token isn't staked");
         if (checkOwnership) {
             require(stakedChef.owner == _msgSender(), "You don't own this token");
         }
 
-        uint256 maxTime = 43200; //12*60*60
-        uint256 chefType = chef.getType(_tokenId);
-        if( chefType == chef.MASTER_CHEF_TYPE()){
-            maxTime = maxTime / 2; // master chefs rest half of the time of regular chefs
-        }
-
-        uint256 fatigue = getFatigueAccruedForChef(_tokenId, false);
-        if(fatigue > MAX_FATIGUE / 2){
-            return maxTime * fatigue / MAX_FATIGUE;
-        }
-
-        return maxTime / 2; // minimum rest time is half of the maximum time
+        return restingTimeCalculation(chef.getType(_tokenId), chef.MASTER_CHEF_TYPE(), getFatigueAccruedForChef(_tokenId, false));
     }
 
     function getPizzaAccruedForManyChefs(uint256[] calldata _tokenIds) public view returns (uint256[] memory) {
@@ -164,9 +179,38 @@ contract Pizzeria is PizzeriaProgression, Ownable, ReentrancyGuard {
         return output;
     }
 
+    function getNetPPM(address _owner) public view returns (uint256) {
+        uint256 chefBalance = ownedChefStakesBalance[_owner];
+        uint256 output;
+        for (uint256 i = 0; i < chefBalance; i++) {
+            uint256 tokenId = ownedChefStakes[_owner][i];
+            uint256 fatigue = getFatigueAccruedForChef(tokenId, false);
+            uint256 ppm = chef.getYield(tokenId);
+            uint256 upgradeId = _getUpgradeStakedForChef(_owner, tokenId);
+            if(upgradeId > 0){
+                ppm += upgrade.getYield(upgradeId);
+            }
+            output += ppm * (MAX_FATIGUE - fatigue);
+        }
+        return output * YIELD_PPS / MAX_FATIGUE;
+    }
+
     /**
      * Returns chef's pizza from chefPizza mapping
      */
+     function pizzaAccruedCalculation(uint256 _initialPizza, uint256 _deltaTime, uint256 _ppm, uint256 _modifier, uint256 _fatigue, uint256 _fatiguePerMinute) public pure returns (uint256) {
+        if(_fatigue >= MAX_FATIGUE){
+            return _initialPizza;
+        }
+
+        uint256 a = _deltaTime * _ppm * YIELD_PPS * _modifier * (MAX_FATIGUE - _fatigue) / ( 100 * MAX_FATIGUE);
+        uint256 b = _deltaTime * _deltaTime * _ppm * YIELD_PPS * _modifier * _fatiguePerMinute / (100 * 2 * 60 * MAX_FATIGUE);
+        if(a > b){
+            return _initialPizza + a - b;
+        }
+
+        return _initialPizza;
+    }
     function _getPizzaAccruedForChef(uint256 _tokenId, bool checkOwnership) internal view returns (uint256) {
         StakedChef memory stakedChef = stakedChefs[_tokenId];
         address owner = stakedChef.owner;
@@ -175,12 +219,12 @@ contract Pizzeria is PizzeriaProgression, Ownable, ReentrancyGuard {
             require(owner == _msgSender(), "You don't own this token");
         }
 
-        // if chefFatigue = 1 it means that chefPizza already has the correct value for the pizza, since it didn't produce pizza since last update
-        if(chefFatigue[_tokenId] == 1){
+        // if chefFatigue = MAX_FATIGUE it means that chefPizza already has the correct value for the pizza, since it didn't produce pizza since last update
+        uint256 chefFatigueLastUpdate = chefFatigue[_tokenId];
+        if(chefFatigueLastUpdate == MAX_FATIGUE){
             return chefPizza[_tokenId];
         }
 
-        uint256 modifiedFatiguePerMinute = _getFatiguePerMinuteWithModifier(owner);
         uint256 timeUntilFatigued = getTimeUntilFatigued(_tokenId, false);
 
         uint256 endTimestamp;
@@ -190,24 +234,18 @@ contract Pizzeria is PizzeriaProgression, Ownable, ReentrancyGuard {
             endTimestamp = block.timestamp;
         }
 
-        uint256 ppm;
-        uint256 upgradeId = _getUpgradeStakedForChef(_tokenId);
+        uint256 ppm = chef.getYield(_tokenId);
+        uint256 upgradeId = _getUpgradeStakedForChef(owner, _tokenId);
 
         if(upgradeId > 0){
-            ppm = (chef.getYield(_tokenId) + upgrade.getYield(upgradeId) ) * YIELD_PPS;
-        } else {
-            ppm = chef.getYield(_tokenId) * YIELD_PPS;
+            ppm += upgrade.getYield(upgradeId);
         }
 
-        uint256 masterChefSkillModifier = _getMasterChefSkillModifier(owner, _getMasterChefNumber(owner));
-        ppm = ppm * masterChefSkillModifier / 100;
+        uint256 masterChefSkillModifier = getMasterChefSkillModifier(owner, _getMasterChefNumber(owner));
 
         uint256 delta = endTimestamp - stakedChef.startTimestamp;
 
-        uint256 pizzaAccruedForChef = delta * ppm * (MAX_FATIGUE - chefFatigue[_tokenId]) / (MAX_FATIGUE);
-        pizzaAccruedForChef -= delta * delta * ppm * modifiedFatiguePerMinute / (2 * MAX_FATIGUE);
-
-        return chefPizza[_tokenId] + pizzaAccruedForChef;
+        return pizzaAccruedCalculation(chefPizza[_tokenId], delta, ppm, masterChefSkillModifier, chefFatigueLastUpdate, getFatiguePerMinuteWithModifier(owner));
     }
 
     /**
@@ -233,16 +271,16 @@ contract Pizzeria is PizzeriaProgression, Ownable, ReentrancyGuard {
      * This function is called in _updateState
      */
 
-    function fatiguePerMinuteCalculation(uint256 ppm) public pure returns (uint256) {
+    function fatiguePerMinuteCalculation(uint256 _ppm) public pure returns (uint256) {
         // NOTE: fatiguePerMinute[_owner] = 8610000000 + 166000000  * totalPPM[_owner] + -220833 * totalPPM[_owner]* totalPPM[_owner]  + 463 * totalPPM[_owner]*totalPPM[_owner]*totalPPM[_owner]; 
         uint256 a = 463;
         uint256 b = 220833;
         uint256 c = 166000000;
         uint256 d = 8610000000;
-        if(ppm == 0){
+        if(_ppm == 0){
             return d;
         }
-        return d + c * ppm + a * ppm * ppm * ppm - b * ppm * ppm;
+        return d + c * _ppm + a * _ppm * _ppm * _ppm - b * _ppm * _ppm;
     }
 
     function _updatefatiguePerMinute(address _owner) internal {
@@ -260,7 +298,7 @@ contract Pizzeria is PizzeriaProgression, Ownable, ReentrancyGuard {
         for (uint256 i = 0; i < chefBalance; i++) {
             uint256 tokenId = ownedChefStakes[_owner][i];
             StakedChef storage stakedChef = stakedChefs[tokenId];
-            if (stakedChef.staked) {
+            if (stakedChef.staked && block.timestamp > stakedChef.startTimestamp) {
                 chefPizza[tokenId] = _getPizzaAccruedForChef(tokenId, false);
 
                 chefFatigue[tokenId] = getFatigueAccruedForChef(tokenId, false);
@@ -272,18 +310,16 @@ contract Pizzeria is PizzeriaProgression, Ownable, ReentrancyGuard {
     }
 
     //Claim
-    function claimPizza() public {
+    function _claimPizza(address _owner) internal {
         uint256 totalClaimed = 0;
 
-        address owner = _msgSender();
+        uint256 freezerSkillModifier = getFreezerSkillModifier(_owner);
+        uint256 burnSkillModifier = getBurnSkillModifier(_owner);
 
-        uint256 freezerSkillModifier = _getFreezerSkillModifier(owner);
-        uint256 burnSkillModifier = _getBurnSkillModifier(owner);
-
-        uint256 chefBalance = ownedChefStakesBalance[owner];
+        uint256 chefBalance = ownedChefStakesBalance[_owner];
 
         for (uint256 i = 0; i < chefBalance; i++) {
-            uint256 chefId = ownedChefStakes[owner][i];
+            uint256 chefId = ownedChefStakes[_owner][i];
 
             totalClaimed += _getPizzaAccruedForChef(chefId, true); // also checks that msg.sender owns this token
 
@@ -301,28 +337,34 @@ contract Pizzeria is PizzeriaProgression, Ownable, ReentrancyGuard {
         pizza.mint(freezerAddress, taxAmountFreezer);
     }
 
-    function unstakeChefsAndUpgrades(uint256[] calldata _chefIds, uint256[2][] calldata _upgradeIds) public nonReentrant {
-        claimPizza();
-
+    function claimPizza() public nonReentrant whenNotPaused {
         address owner = _msgSender();
+        _claimPizza(owner);
+    }
+
+    function unstakeChefsAndUpgrades(uint256[] calldata _chefIds, uint256[] calldata _upgradeIds) public nonReentrant whenNotPaused {
+        address owner = _msgSender();
+        // Check 1:1 correspondency between chef and upgrade
+        require(ownedChefStakesBalance[owner] - _chefIds.length >= ownedUpgradeStakesBalance[owner] - _upgradeIds.length, "Needs at least chef for each tool");
+
+        _claimPizza(owner);
         
         for (uint256 i = 0; i < _upgradeIds.length; i++) { //unstake upgrades
-            uint256 upgradeId = _upgradeIds[0][i];
-            uint256 chefId = _upgradeIds[1][i];
+            uint256 upgradeId = _upgradeIds[i];
 
-            require(upgrade.ownerOf(upgradeId) == owner, "You don't own this upgrade");
-            require(chef.ownerOf(chefId) == owner, "You don't own this chef");
-            require(stakedChefs[chefId].staked, "Chef needs to be staked");
+            require(stakedUpgrades[upgradeId].owner == owner, "You don't own this tool");
+            require(stakedUpgrades[upgradeId].staked, "Tool needs to be staked");
 
-            _removeUpgradeFromChef(upgradeId, chefId);
             totalPPM[owner] -= upgrade.getYield(upgradeId);
             upgrade.transferFrom(address(this), owner, upgradeId);
+
+            _removeUpgrade(upgradeId);
         }
 
-        for (uint256 i = 0; i < _chefIds.length; i++) { //unstake chefs and the ugprades they hold
+        for (uint256 i = 0; i < _chefIds.length; i++) { //unstake chefs
             uint256 chefId = _chefIds[i];
 
-            require(chef.ownerOf(chefId) == owner, "You don't own this token");
+            require(stakedChefs[chefId].owner == owner, "You don't own this token");
             require(stakedChefs[chefId].staked, "Chef needs to be staked");
 
             if(chef.getType(chefId) == chef.MASTER_CHEF_TYPE()){
@@ -332,13 +374,6 @@ contract Pizzeria is PizzeriaProgression, Ownable, ReentrancyGuard {
             }
 
             totalPPM[owner] -= chef.getYield(chefId);
-
-            uint256 upgradeId = _getUpgradeStakedForChef(chefId);
-            if(upgradeId > 0){
-                totalPPM[owner] -= upgrade.getYield(upgradeId);
-                _removeUpgradeFromChef(upgradeId, chefId);
-                upgrade.transferFrom(address(this), owner, upgradeId);
-            }
 
             _moveChefToCooldown(chefId);
         }
@@ -352,14 +387,17 @@ contract Pizzeria is PizzeriaProgression, Ownable, ReentrancyGuard {
      * This function updates stake chefs and upgrades
      * The upgrades are paired with the chef the upgrade will be applied
      */
-    function stakeMany(uint256[] calldata _chefIds, uint256[2][] calldata _upgradeIds) public nonReentrant {
+    function stakeMany(uint256[] calldata _chefIds, uint256[] calldata _upgradeIds) public nonReentrant whenNotPaused {
         require(gameStarted(), "The game has not started");
 
         address owner = _msgSender();
 
-        uint256 maxNumberChefs = _getMaxNumberChefs(owner);
+        uint256 maxNumberChefs = getMaxNumberChefs(owner);
         uint256 chefsAfterStaking = _chefIds.length + numberOfChefs[owner][0] + numberOfChefs[owner][1];
         require(maxNumberChefs >= chefsAfterStaking, "You can't stake that many chefs");
+
+        // Check 1:1 correspondency between chef and upgrade
+        require(ownedChefStakesBalance[owner] + _chefIds.length >= ownedUpgradeStakesBalance[owner] + _upgradeIds.length, "Needs at least chef for each tool");
 
         for (uint256 i = 0; i < _chefIds.length; i++) { //stakes chef
             uint256 chefId = _chefIds[i];
@@ -380,21 +418,18 @@ contract Pizzeria is PizzeriaProgression, Ownable, ReentrancyGuard {
 
             chef.transferFrom(owner, address(this), chefId);
         }
-
-        uint256 maxLevelUpgrade = _getMaxLevelUpgrade(owner);
+        uint256 maxLevelUpgrade = getMaxLevelUpgrade(owner);
         for (uint256 i = 0; i < _upgradeIds.length; i++) { //stakes upgrades
-            uint256 upgradeId = _upgradeIds[0][i];
-            uint256 chefId = _upgradeIds[1][i];
+            uint256 upgradeId = _upgradeIds[i];
 
-            require(upgrade.ownerOf(upgradeId) == owner, "You don't own this upgrade");
-            require(upgrade.getLevel(upgradeId) <= maxLevelUpgrade, "You can't equip that upgrade");
-            require(chef.ownerOf(chefId) == owner, "You don't own this chef");
-            require(chef.getType(chefId) > 0, "Chef not yet revealed");
-            require(stakedChefs[chefId].staked, "Chef needs to be staked");
+            require(upgrade.ownerOf(upgradeId) == owner, "You don't own this tool");
+            require(!stakedUpgrades[upgradeId].staked, "Tool is already staked");
+            require(upgrade.getLevel(upgradeId) <= maxLevelUpgrade, "You can't equip that tool");
 
             upgrade.transferFrom(owner, address(this), upgradeId);
-            _addUpgradeToChef(upgradeId, chefId); 
             totalPPM[owner] += upgrade.getYield(upgradeId);
+
+             _addUpgradeToPizzeria(upgradeId, owner);
         }
         _updateState(owner);
     }
@@ -409,6 +444,16 @@ contract Pizzeria is PizzeriaProgression, Ownable, ReentrancyGuard {
         _addStakeToOwnerEnumeration(_owner, _tokenId);
     }
 
+    function _addUpgradeToPizzeria(uint256 _tokenId, address _owner) internal {
+        stakedUpgrades[_tokenId] = StakedUpgrade({
+            owner: _owner,
+            tokenId: _tokenId,
+            staked: true
+        });
+        _addUpgradeToOwnerEnumeration(_owner, _tokenId);
+    }
+
+
     function _addStakeToOwnerEnumeration(address _owner, uint256 _tokenId) internal {
         uint256 length = ownedChefStakesBalance[_owner];
         ownedChefStakes[_owner][length] = _tokenId;
@@ -416,23 +461,17 @@ contract Pizzeria is PizzeriaProgression, Ownable, ReentrancyGuard {
         ownedChefStakesBalance[_owner]++;
     }
 
-
-    function _addUpgradeToChef(uint256 _upgradeId, uint256 _chefId) internal {
-        require(ownedUpgradeByChef[_chefId] == 0, "Chef can't hold two upgrades");
-        ownedUpgradeByChef[_chefId] = _upgradeId;
+    function _addUpgradeToOwnerEnumeration(address _owner, uint256 _tokenId) internal {
+        uint256 length = ownedUpgradeStakesBalance[_owner];
+        ownedUpgradeStakes[_owner][length] = _tokenId;
+        ownedUpgradeStakesIndex[_tokenId] = length;
+        ownedUpgradeStakesBalance[_owner]++;
     }
 
-    // Unstake
-    function _removeUpgradeFromChef(uint256 _upgradeId, uint256 _chefId) internal {
-        require(ownedUpgradeByChef[_chefId] == _upgradeId, "The chef is not holding this upgrade.");
-        delete ownedUpgradeByChef[_chefId];
-    }
-
-    // Cooldown
     function _moveChefToCooldown(uint256 _chefId) internal {
         address owner = stakedChefs[_chefId].owner;
 
-        uint256 endTimestamp = block.timestamp + _getRestingTime(_chefId, false);
+        uint256 endTimestamp = block.timestamp + getRestingTime(_chefId, false);
         restingChefs[_chefId] = RestingChef({
             owner: owner,
             tokenId: _chefId,
@@ -446,7 +485,16 @@ contract Pizzeria is PizzeriaProgression, Ownable, ReentrancyGuard {
         _addCooldownToOwnerEnumeration(owner, _chefId);
     }
 
-    function withdrawChefs(uint256[] calldata _chefIds) public {
+    // Cooldown
+    function _removeUpgrade(uint256 _upgradeId) internal {
+        address owner = stakedUpgrades[_upgradeId].owner;
+
+        delete stakedUpgrades[_upgradeId];
+
+        _removeUpgradeFromOwnerEnumeration(owner, _upgradeId);
+    }
+
+    function withdrawChefs(uint256[] calldata _chefIds) public nonReentrant whenNotPaused {
         for (uint256 i = 0; i < _chefIds.length; i++) {
             uint256 _chefId = _chefIds[i];
             RestingChef memory resting = restingChefs[_chefId];
@@ -458,6 +506,37 @@ contract Pizzeria is PizzeriaProgression, Ownable, ReentrancyGuard {
             _removeChefFromCooldown(_chefId);
             chef.transferFrom(address(this), _msgSender(), _chefId);
         }
+    }
+
+    function reStakeRestedChefs(uint256[] calldata _chefIds) public nonReentrant whenNotPaused {
+        address owner = _msgSender();
+
+        uint256 maxNumberChefs = getMaxNumberChefs(owner);
+        uint256 chefsAfterStaking = _chefIds.length + numberOfChefs[owner][0] + numberOfChefs[owner][1];
+        require(maxNumberChefs >= chefsAfterStaking, "You can't stake that many chefs");
+
+        for (uint256 i = 0; i < _chefIds.length; i++) { //stakes chef
+            uint256 _chefId = _chefIds[i];
+
+            RestingChef memory resting = restingChefs[_chefId];
+
+            require(resting.present, "Chef is not resting");
+            require(resting.owner == owner, "You don't own this chef");
+            require(block.timestamp >= resting.endTimestamp, "Chef is still resting");
+
+            _removeChefFromCooldown(_chefId);
+
+            _addChefToPizzeria(_chefId, owner);
+
+            if(chef.getType(_chefId) == chef.MASTER_CHEF_TYPE()){
+                numberOfChefs[owner][1]++; 
+            } else {
+                numberOfChefs[owner][0]++; 
+            }
+
+            totalPPM[owner] += chef.getYield(_chefId);
+        }
+        _updateState(owner);
     }
 
     function _addCooldownToOwnerEnumeration(address _owner, uint256 _tokenId) internal {
@@ -481,6 +560,22 @@ contract Pizzeria is PizzeriaProgression, Ownable, ReentrancyGuard {
         delete ownedChefStakesIndex[_tokenId];
         delete ownedChefStakes[_owner][lastTokenIndex];
         ownedChefStakesBalance[_owner]--;
+    }
+
+    function _removeUpgradeFromOwnerEnumeration(address _owner, uint256 _tokenId) internal {
+        uint256 lastTokenIndex = ownedUpgradeStakesBalance[_owner] - 1;
+        uint256 tokenIndex = ownedUpgradeStakesIndex[_tokenId];
+
+        if (tokenIndex != lastTokenIndex) {
+            uint256 lastTokenId = ownedUpgradeStakes[_owner][lastTokenIndex];
+
+            ownedUpgradeStakes[_owner][tokenIndex] = lastTokenId;
+            ownedUpgradeStakesIndex[lastTokenId] = tokenIndex;
+        }
+
+        delete ownedUpgradeStakesIndex[_tokenId];
+        delete ownedUpgradeStakes[_owner][lastTokenIndex];
+        ownedUpgradeStakesBalance[_owner]--;
     }
 
     function _removeChefFromCooldown(uint256 _chefId) internal {
@@ -526,11 +621,18 @@ contract Pizzeria is PizzeriaProgression, Ownable, ReentrancyGuard {
 
         for (uint256 i = 0; i < outputSize; i++) {
             uint256 chefId = stakeOfOwnerByIndex(_owner, _offset + i);
-            uint256 upgradeId = _getUpgradeStakedForChef(chefId);
+            uint256 upgradeId = _getUpgradeStakedForChef(_owner, chefId);
+            uint256 chefPPM = chef.getYield(chefId);
+            uint256 upgradePPM;
+            if(upgradeId > 0){
+                upgradePPM = upgrade.getYield(upgradeId);
+            }
 
             outputs[i] = StakedChefInfo({
                 chefId: chefId,
                 upgradeId: upgradeId,
+                chefPPM: chefPPM,
+                upgradePPM: upgradePPM, 
                 pizza: _getPizzaAccruedForChef(chefId, false),
                 fatigue: getFatigueAccruedForChef(chefId, false),
                 timeUntilFatigued: getTimeUntilFatigued(chefId, false)

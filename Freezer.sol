@@ -5,10 +5,11 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/math/SafeMath.sol";
+import "@openzeppelin/contracts/security/Pausable.sol";
 
 import "./Pizza.sol";
 
-contract Freezer is ERC20("Staked Pizza", "sPIZZA"), Ownable {
+contract Freezer is ERC20("Staked Pizza", "sPIZZA"), Ownable, Pausable {
     using SafeERC20 for Pizza;
     using SafeMath for uint256;
 
@@ -22,6 +23,8 @@ contract Freezer is ERC20("Staked Pizza", "sPIZZA"), Ownable {
 
     mapping(address => uint256) public unlockAmounts;
     mapping(address => uint256) public unlockTimestamps;
+
+    uint256 public stakeTime;
 
     constructor(Pizza _pizza) {
         pizza = _pizza;
@@ -40,7 +43,8 @@ contract Freezer is ERC20("Staked Pizza", "sPIZZA"), Ownable {
 
     // External
 
-    function stake(uint256 _amount) external {
+    function stake(uint256 _amount) external whenNotPaused {
+        require(stakeStarted(), "You can't stake yet");
         uint256 totalShares = totalSupply();
         // If no sPIZZA exists, mint it 1:1 to the amount put in
         if (totalShares == 0 || pizzaBalance() == 0) {
@@ -53,7 +57,7 @@ contract Freezer is ERC20("Staked Pizza", "sPIZZA"), Ownable {
         pizza.transferToFreezer(_msgSender(), _amount);
     }
 
-    function quickUnstake(uint256 _share) external {
+    function quickUnstake(uint256 _share) external whenNotPaused {
         // QUICK_UNSTAKE_CONTRIBUTION_PERCENT of the claimable PIZZA will remain in the freezer
         // the rest is transfered to the staker
         uint256 unstakeOutput = _unstakeOutput(_share);
@@ -71,9 +75,9 @@ contract Freezer is ERC20("Staked Pizza", "sPIZZA"), Ownable {
     /**
      * @dev _share argument specified in sPIZZA
      */
-    function prepareDelayedUnstake(uint256 _share) external {
+    function prepareDelayedUnstake(uint256 _share) external whenNotPaused {
         // calculate output and burn staker's share
-        uint256 output = _unstakeOutput(_share);
+        uint256 output = _unstakeOutput(_share); //converts spizza values to pizza
         _burn(_msgSender(), _share);
 
         // calculate and burn amount of output spoiled
@@ -92,7 +96,7 @@ contract Freezer is ERC20("Staked Pizza", "sPIZZA"), Ownable {
     /**
      * @dev argument specified in PIZZA, not sPIZZA
      */
-    function claimDelayedUnstake(uint256 _amount) external {
+    function claimDelayedUnstake(uint256 _amount) external whenNotPaused {
         require(block.timestamp >= unlockTimestamps[_msgSender()], "PIZZA not yet unlocked");
         require(_amount <= unlockAmounts[_msgSender()], "insufficient locked balance");
 
@@ -103,5 +107,17 @@ contract Freezer is ERC20("Staked Pizza", "sPIZZA"), Ownable {
 
         // transfer claim
         pizza.safeTransfer(_msgSender(), _amount);
+    }
+
+    // Admin
+
+    function stakeStarted() public view returns (bool) {
+        return stakeTime != 0 && block.timestamp >= stakeTime;
+    }
+
+    function setStakeStartTime(uint256 _startTime) external onlyOwner {
+        require (_startTime >= block.timestamp, "startTime cannot be in the past");
+        require(!stakeStarted(), "staking already started");
+        stakeTime = _startTime;
     }
 }

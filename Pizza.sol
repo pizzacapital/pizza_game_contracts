@@ -7,6 +7,9 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 contract Pizza is ERC20("Pizza", "PIZZA"), Ownable {
     uint256 public constant ONE_PIZZA = 1e18;
     uint256 public constant NUM_PROMOTIONAL_PIZZA = 500_000;
+    uint256 public constant NUM_PIZZA_SODA_LP = 20_000_000;
+
+    uint256 public NUM_PIZZA_AVAX_LP = 30_000_000;
 
     address public freezerAddress;
     address public pizzeriaAddress;
@@ -14,6 +17,8 @@ contract Pizza is ERC20("Pizza", "PIZZA"), Ownable {
     address public upgradeAddress;
 
     bool public promotionalPizzaMinted = false;
+    bool public avaxLPPizzaMinted = false;
+    bool public sodaLPPizzaMinted = false;
 
     // ADMIN
 
@@ -45,6 +50,22 @@ contract Pizza is ERC20("Pizza", "PIZZA"), Ownable {
         require(!promotionalPizzaMinted, "promotional pizza has already been minted");
         promotionalPizzaMinted = true;
         _mint(_to, NUM_PROMOTIONAL_PIZZA * ONE_PIZZA);
+    }
+
+    function mintAvaxLPPizza() external onlyOwner {
+        require(!avaxLPPizzaMinted, "avax pizza LP has already been minted");
+        avaxLPPizzaMinted = true;
+        _mint(owner(), NUM_PIZZA_AVAX_LP * ONE_PIZZA);
+    }
+
+    function mintSodaLPPizza() external onlyOwner {
+        require(!sodaLPPizzaMinted, "soda pizza LP has already been minted");
+        sodaLPPizzaMinted = true;
+        _mint(owner(), NUM_PIZZA_SODA_LP * ONE_PIZZA);
+    }
+
+    function setNumPizzaAvaxLp(uint256 _numPizzaAvaxLp) external onlyOwner {
+        NUM_PIZZA_AVAX_LP = _numPizzaAvaxLp;
     }
 
     // external

@@ -15,23 +15,21 @@ contract PizzaBank is Ownable, Pausable, ReentrancyGuard {
 
     // Info of each user.
     struct UserInfo {
-        uint256 amount;
-        uint256 rewardDebt;
+        uint256 amount; // How many LP tokens the user has provided.
+        uint256 rewardDebt; // Reward debt. See explanation below.
     }
 
-    // Info of each pool.
-    struct PoolInfo {
-        IERC20 lpToken; // Address of LP token contract.
-        uint256 lastRewardTimestamp; // Last timestamp that Reward distribution occurs.
-        uint256 accRewardTokenPerShare; // Accumulated Reward per share, times 1e12. See below.
-    }
+
+    IERC20 public lpToken; // Address of LP token contract.
+    uint256 public lastRewardTimestamp; // Last timestamp that Reward distribution occurs.
+    uint256 public accRewardTokenPerShare; // Accumulated Reward per share, times 1e12. See below.
+
+    uint256 public bonusEndTimestamp; // deadline of the vault
 
     IERC20 public rewardToken;
     // Reward tokens created per second.
     uint256 public rewardPerSecond;
 
-    // Info of pool.
-    PoolInfo public poolInfo;
     // Info of each user that stakes LP tokens.
     mapping (address => UserInfo) public userInfo;
 
@@ -47,46 +45,71 @@ contract PizzaBank is Ownable, Pausable, ReentrancyGuard {
         IERC20 _stakeToken,
         IERC20 _rewardToken,
         uint256 _rewardPerSecond,
-        uint256 _startTimestamp
+        uint256 _startTimestamp,
+        uint256 _bonusEndTimestamp
     ) {
         rewardToken = _rewardToken;
+        bonusEndTimestamp = _bonusEndTimestamp;
         rewardPerSecond = _rewardPerSecond;
 
-        poolInfo = PoolInfo({
-                lpToken: _stakeToken,
-                lastRewardTimestamp: _startTimestamp,
-                accRewardTokenPerShare: 0
-            });
+        lpToken = _stakeToken;
+        lastRewardTimestamp = _startTimestamp;
+        accRewardTokenPerShare = 0;
+
+    }
+
+    // Returns calculated or manual rewards per second
+    function getRewardPerSecond() public view returns (uint256) {
+        return rewardPerSecond;
+    }
+
+    // Return reward multiplier over the given _from to _to block.
+    function getMultiplier(uint256 _from, uint256 _to) public view returns (uint256) {
+        if (_to <= bonusEndTimestamp) {
+            return _to.sub(_from);
+        } else if (_from >= bonusEndTimestamp) {
+            return 0;
+        } else {
+            return bonusEndTimestamp.sub(_from);
+        }
+    }
+
+    function rewardBalance() public view returns (uint256) {
+        return rewardToken.balanceOf(address(this));
+    }
+
+    function depositedBalance() public view returns (uint256) {
+        return lpToken.balanceOf(address(this));
     }
 
     // View function to see pending Token on frontend.
     function pendingRewards(address _user) external view returns (uint256) {
         UserInfo storage user = userInfo[_user];
-        uint256 accRewardTokenPerShare = poolInfo.accRewardTokenPerShare;
-        uint256 lpSupply = poolInfo.lpToken.balanceOf(address(this));
-        if (block.timestamp > poolInfo.lastRewardTimestamp && lpSupply != 0) {
-            uint256 multiplier = block.timestamp.sub(poolInfo.lastRewardTimestamp);
-            uint256 tokenReward = multiplier.mul(rewardPerSecond);
-            accRewardTokenPerShare = accRewardTokenPerShare.add(tokenReward.mul(1e12).div(lpSupply));
+        uint256 accRewardToken = accRewardTokenPerShare;
+        uint256 lpSupply = lpToken.balanceOf(address(this));
+        if (block.timestamp > lastRewardTimestamp && lpSupply != 0) {
+            uint256 multiplier = getMultiplier(lastRewardTimestamp, block.timestamp);
+            uint256 tokenReward = multiplier.mul(getRewardPerSecond());
+            accRewardToken = accRewardToken.add(tokenReward.mul(1e12).div(lpSupply));
         }
-        return user.amount.mul(accRewardTokenPerShare).div(1e12).sub(user.rewardDebt);
+        return user.amount.mul(accRewardToken).div(1e12).sub(user.rewardDebt);
     }
-
+    
     // Update reward variables of the given pool to be up-to-date.
     function updatePool() public whenNotPaused {
-        if (block.timestamp <= poolInfo.lastRewardTimestamp) {
+        if (block.timestamp <= lastRewardTimestamp) {
             return;
         }
-        uint256 lpSupply = poolInfo.lpToken.balanceOf(address(this));
+        uint256 lpSupply = lpToken.balanceOf(address(this));
+
         if (lpSupply == 0) {
-            poolInfo.lastRewardTimestamp = block.timestamp;
+            lastRewardTimestamp = block.timestamp;
             return;
         }
-        uint256 multiplier = block.timestamp.sub(poolInfo.lastRewardTimestamp);
-        uint256 tokenReward = multiplier.mul(rewardPerSecond);
-        poolInfo.accRewardTokenPerShare = poolInfo.accRewardTokenPerShare.add(tokenReward.mul(1e12).div(lpSupply));
-        poolInfo.lastRewardTimestamp = block.timestamp;
-        emit UpdatePool(poolInfo.lastRewardTimestamp, lpSupply, poolInfo.accRewardTokenPerShare);
+        uint256 multiplier = getMultiplier(lastRewardTimestamp, block.timestamp);
+        accRewardTokenPerShare = accRewardTokenPerShare.add(multiplier.mul(getRewardPerSecond()).mul(1e12).div(lpSupply));
+        lastRewardTimestamp = block.timestamp;
+        emit UpdatePool(lastRewardTimestamp, lpSupply, accRewardTokenPerShare);
     }
 
     // Deposit LP tokens to MasterChef for Reward allocation.
@@ -94,17 +117,17 @@ contract PizzaBank is Ownable, Pausable, ReentrancyGuard {
         UserInfo storage user = userInfo[msg.sender];
         updatePool();
         if (user.amount > 0) {
-            uint256 pending = user.amount.mul(poolInfo.accRewardTokenPerShare).div(1e12).sub(user.rewardDebt);
+            uint256 pending = user.amount.mul(accRewardTokenPerShare).div(1e12).sub(user.rewardDebt);
             if(pending > 0) {
                 safeTokenTransfer(msg.sender, pending);
+                emit Harvest(msg.sender, pending);
             }
-            emit Harvest(msg.sender, pending);
         }
         user.amount = user.amount.add(_amount);
-        user.rewardDebt = user.amount.mul(poolInfo.accRewardTokenPerShare).div(1e12);
+        user.rewardDebt = user.amount.mul(accRewardTokenPerShare).div(1e12);
 
         if(_amount > 0) {
-            poolInfo.lpToken.safeTransferFrom(address(msg.sender), address(this), _amount);
+            lpToken.safeTransferFrom(address(msg.sender), address(this), _amount);
         }
         emit Deposit(msg.sender, _amount);
     }
@@ -117,25 +140,25 @@ contract PizzaBank is Ownable, Pausable, ReentrancyGuard {
         updatePool();
 
         // Harvest Reward
-        uint256 pending = user.amount.mul(poolInfo.accRewardTokenPerShare).div(1e12).sub(user.rewardDebt);
+        uint256 pending = user.amount.mul(accRewardTokenPerShare).div(1e12).sub(user.rewardDebt);
         if(pending > 0) {
             safeTokenTransfer(msg.sender, pending);
+            emit Harvest(msg.sender, pending);
         }
-        emit Harvest(msg.sender, pending);
 
         user.amount = user.amount.sub(_amount);
-        user.rewardDebt = user.amount.mul(poolInfo.accRewardTokenPerShare).div(1e12);
+        user.rewardDebt = user.amount.mul(accRewardTokenPerShare).div(1e12);
 
         if(_amount > 0) {
-            poolInfo.lpToken.safeTransfer(address(msg.sender), _amount);
+            lpToken.safeTransfer(address(msg.sender), _amount);
         }
         emit Withdraw(msg.sender, _amount);
     }
 
     // Withdraw without caring about rewards. EMERGENCY ONLY.
-    function emergencyWithdraw() public nonReentrant {
+    function emergencyWithdraw() public whenNotPaused nonReentrant {
         UserInfo storage user = userInfo[msg.sender];
-        poolInfo.lpToken.safeTransfer(address(msg.sender), user.amount);
+        lpToken.safeTransfer(address(msg.sender), user.amount);
         user.amount = 0;
         user.rewardDebt = 0;
         emit EmergencyWithdraw(msg.sender, user.amount);
@@ -165,9 +188,14 @@ contract PizzaBank is Ownable, Pausable, ReentrancyGuard {
         emit EmergencyRewardWithdraw(msg.sender, _amount);
     }
 
-    // enables owner to pause / unpause minting
-    function setPaused(bool _paused) external onlyOwner {
-        if (_paused) _pause();
-        else _unpause();
+    function setRewardPerSecond(uint256 _rewardPerSecond) external onlyOwner {
+        rewardPerSecond = _rewardPerSecond;
     }
+
+    /// The block when rewards will end
+    function setBonusEndTimestamp(uint256 _bonusEndTimestamp) external onlyOwner {
+        require(_bonusEndTimestamp > bonusEndTimestamp, 'new bonus end block must be greater than current');
+        bonusEndTimestamp = _bonusEndTimestamp;
+    }
+
 }
