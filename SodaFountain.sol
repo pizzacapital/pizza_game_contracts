@@ -36,7 +36,7 @@ contract SodaFountain is Ownable, Pausable, ReentrancyGuard {
     uint256 public lastRewardTimestamp; // Last timestamp that Reward distribution occurs.
     uint256 public accRewardTokenPerShare; // Accumulated Reward per share, times 1e12. See below.
 
-    uint256 public constant BASE_RATE = 173611111111111000; // 15000 * 1e18 / 86400
+    uint256 public baseRate = 17361111111111100; // 1500 * 1e18 / 86400
 
     uint256 public bonusEndTimestamp; // deadline of the vault
 
@@ -44,6 +44,8 @@ contract SodaFountain is Ownable, Pausable, ReentrancyGuard {
     // Reward tokens created per second.
     uint256 public manualRewardPerSecond;
     uint256 public rewardMultiplier = 5; // Multipler for the calculated emission per second
+    uint256 public rewardMultiplierDivision = 10; // Multipler for the calculated emission per second
+
     uint256 public initialLPValue; // Initial number of LP tokens of AVAX-PIZZA
     uint256 public initialLPAvax; // Initial number of AVAX deposited in the LP
 
@@ -52,25 +54,30 @@ contract SodaFountain is Ownable, Pausable, ReentrancyGuard {
 
     event Deposit(address indexed user, uint256 amount);
     event Withdraw(address indexed user, uint256 amount);
-    event UpdatePool(uint256 lastRewardTimestamp, uint256 lpSupply, uint256 accRewardTokenPerShare);
     event Harvest(address indexed user, uint256 amount);
     event EmergencyWithdraw(address indexed user, uint256 amount);
     event DepositRewards(uint256 amount);
     event EmergencyRewardWithdraw(address indexed user, uint256 amount);
-
-    constructor(
-        IERC20 _stakeToken,
-        IERC20 _rewardToken,
-        uint256 _startTimestamp,
-        uint256 _bonusEndTimestamp
-    ) {
-        rewardToken = _rewardToken;
-        bonusEndTimestamp = _bonusEndTimestamp;
-
+    
+    function setStakeToken(IERC20 _stakeToken) external onlyOwner {
+        require(!fountainStarted(), "Fountain is running");
         lpToken = _stakeToken;
-        lastRewardTimestamp = _startTimestamp;
-        accRewardTokenPerShare = 0;
+    }
 
+    function setRewardToken(IERC20 _rewardToken) external onlyOwner {
+        require(!fountainStarted(), "Fountain is running");
+        rewardToken = _rewardToken;
+    }
+
+    function setStartTimeStamp(uint256 _startTimestamp) external onlyOwner {
+        require(!fountainStarted(), "Fountain is running");
+        lastRewardTimestamp = _startTimestamp;
+    }
+
+        /// The block when rewards will end
+    function setBonusEndTimestamp(uint256 _bonusEndTimestamp) external onlyOwner {
+        require(_bonusEndTimestamp > bonusEndTimestamp, 'new bonus end block must be greater than current');
+        bonusEndTimestamp = _bonusEndTimestamp;
     }
 
     // Returns calculated or manual rewards per second
@@ -80,7 +87,7 @@ contract SodaFountain is Ownable, Pausable, ReentrancyGuard {
         }
         uint256 lpSupply = lpToken.balanceOf(address(this));
 
-        return rewardPerSecondCalculation(lpSupply, initialLPValue, initialLPAvax, rewardMultiplier);
+        return rewardPerSecondCalculation(lpSupply, initialLPValue, initialLPAvax, rewardMultiplier, rewardMultiplierDivision, baseRate);
     }
 
     // Return reward multiplier over the given _from to _to block.
@@ -92,6 +99,10 @@ contract SodaFountain is Ownable, Pausable, ReentrancyGuard {
         } else {
             return bonusEndTimestamp.sub(_from);
         }
+    }
+
+    function fountainStarted() public view returns (bool) {
+        return lastRewardTimestamp != 0 && bonusEndTimestamp != 0;
     }
 
     function rewardBalance() public view returns (uint256) {
@@ -126,17 +137,25 @@ contract SodaFountain is Ownable, Pausable, ReentrancyGuard {
     function setRewardMultiplier(uint256 _rewardMultiplier) external onlyOwner {
         rewardMultiplier = _rewardMultiplier;
     }
-    
 
-    function rewardPerSecondCalculation(uint256 _lpSupply, uint256 _initialLPValue, uint256 _initialLPAvax, uint256 _rewardMultiplier) public pure returns (uint256) {
+    function setRewardMultiplierDivision(uint256 _rewardMultiplierDivision) external onlyOwner {
+        rewardMultiplierDivision = _rewardMultiplierDivision;
+    }
+    
+    function setBaseRate(uint256 _baseRate) external onlyOwner {
+        baseRate = _baseRate;
+    }
+    
+    
+    function rewardPerSecondCalculation(uint256 _lpSupply, uint256 _initialLPValue, uint256 _initialLPAvax, uint256 _rewardMultiplier, uint256 _rewardMultiplierDivision, uint256 _baseRate) public pure returns (uint256) {
         if(_lpSupply == 0){
             return 0;
         }
         
-        if(_initialLPValue == 0 || _initialLPAvax == 0 || _rewardMultiplier == 0) {
-            return BASE_RATE;
+        if(_initialLPValue == 0 || _initialLPAvax == 0 || _rewardMultiplier == 0 || _rewardMultiplierDivision == 0) {
+            return _baseRate;
         }
-        return BASE_RATE + _rewardMultiplier.mul(_lpSupply).mul(_initialLPAvax).div(_initialLPValue.mul(86400));
+        return _baseRate + _rewardMultiplier.mul(_lpSupply).mul(_initialLPAvax).div(_initialLPValue.mul(_rewardMultiplierDivision).mul(86400));
         
     }
     // Update reward variables of the given pool to be up-to-date.
@@ -153,11 +172,11 @@ contract SodaFountain is Ownable, Pausable, ReentrancyGuard {
         uint256 multiplier = getMultiplier(lastRewardTimestamp, block.timestamp);
         accRewardTokenPerShare = accRewardTokenPerShare.add(multiplier.mul(getRewardPerSecond()).mul(1e12).div(lpSupply));
         lastRewardTimestamp = block.timestamp;
-        emit UpdatePool(lastRewardTimestamp, lpSupply, accRewardTokenPerShare);
     }
 
     // Deposit LP tokens to MasterChef for Reward allocation.
     function deposit(uint256 _amount) public whenNotPaused nonReentrant {
+        require(fountainStarted(), "You can't deposit yet");
         UserInfo storage user = userInfo[msg.sender];
         updatePool();
         if (user.amount > 0) {
@@ -200,7 +219,7 @@ contract SodaFountain is Ownable, Pausable, ReentrancyGuard {
     }
 
     // Withdraw without caring about rewards. EMERGENCY ONLY.
-    function emergencyWithdraw() public whenNotPaused nonReentrant {
+    function emergencyWithdraw() public nonReentrant {
         UserInfo storage user = userInfo[msg.sender];
         lpToken.safeTransfer(address(msg.sender), user.amount);
         user.amount = 0;
@@ -236,10 +255,12 @@ contract SodaFountain is Ownable, Pausable, ReentrancyGuard {
         manualRewardPerSecond = _manualRewardPerSecond;
     }
 
-    /// The block when rewards will end
-    function setBonusEndTimestamp(uint256 _bonusEndTimestamp) external onlyOwner {
-        require(_bonusEndTimestamp > bonusEndTimestamp, 'new bonus end block must be greater than current');
-        bonusEndTimestamp = _bonusEndTimestamp;
+    /**
+     * enables owner to pause / unpause minting
+     */
+    function setPaused(bool _paused) external onlyOwner {
+        if (_paused) _pause();
+        else _unpause();
     }
 
 }
