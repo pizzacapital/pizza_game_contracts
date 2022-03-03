@@ -9,7 +9,7 @@ import "@openzeppelin/contracts/security/Pausable.sol";
 import "./libraries/BoringERC20.sol";
 
 // Adapted from MasterChefJoeV2 and Police And Thieves Vault
-contract PizzaBank is Ownable, Pausable, ReentrancyGuard {
+contract SodaBank is Ownable, Pausable, ReentrancyGuard {
     using SafeMath for uint256;
     using BoringERC20 for IERC20;
 
